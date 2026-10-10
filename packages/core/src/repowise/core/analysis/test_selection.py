@@ -27,9 +27,12 @@ is chosen when any of these hold:
 
 Otherwise the subset is the covering tests, the tests the graph shows reaching
 the changed files (a changed test, the call graph, the import graph) and
-``tests.always_run``, plus every test the graph cannot see into (not indexed,
-or with no resolved edge). A test package's ``__init__.py`` or a ``conftest.py``
-(changed, deleted, or on a route to a changed file) stands for every test under
+``tests.always_run``, plus every test the graph cannot see into: one not
+indexed or with no resolved edge, and one the indexer found listing and reading
+files under a source directory or running the project's own command or module
+in a child process (it imports one module, but exercises far more). A test
+package's ``__init__.py`` or a ``conftest.py`` (changed, deleted, or on a route
+to a changed file) stands for every test under
 its directory. A helper module tests import stands for the tests that import
 it, directly or through other helpers (basis ``helper-importers``), which are the files that run it: Python runs the package file
 for each module in it, and pytest loads a conftest for each test at or below
@@ -402,7 +405,9 @@ class SelectionInput:
     expands to. *doc_readers* maps a changed doc to a file naming it
     (:func:`doc_readers`); *plugin_loader* is a file loading pytest plugins by
     name (:func:`plugin_loader`); *unplaced_tests* are tests the graph cannot
-    see into (not indexed, or with no resolved edge), which every subset runs.
+    see into (not indexed, or with no resolved edge), and *always_run_tests*
+    maps each test the indexer found walking the source tree or running the
+    project in a child process to why; every subset runs both.
     """
 
     changed: Collection[str]
@@ -422,6 +427,7 @@ class SelectionInput:
     doc_readers: Mapping[str, str] = field(default_factory=dict)
     plugin_loader: str | None = None
     unplaced_tests: Collection[str] = ()
+    always_run_tests: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -448,14 +454,14 @@ def select_tests(inp: SelectionInput) -> Selection:
         run_all += file_reasons
     basis = {**triage.basis, **{path: per_file[path][1] for path in triage.code}}
 
-    # The graph cannot say what an unplaced test reaches, so it always runs.
-    unplaced = [(t, t) for t in inp.unplaced_tests] if triage.code else []
+    # The graph cannot say what these tests reach, so they always run.
+    always = _always_running(inp) if triage.code else {}
     tests, test_files = _runnable(
-        [*(t for path in triage.code for t in per_file[path][0]), *unplaced]
+        [*(t for path in triage.code for t in per_file[path][0]), *((t, t) for t in always)]
     )
     return Selection(
         run_all=bool(run_all),
-        reasons=tuple(run_all + _notes(inp, triage.skipped, bool(unplaced))),
+        reasons=tuple(run_all + _notes(inp, triage.skipped, always)),
         tests=tests,
         test_files=test_files,
         packages=_go_packages(triage.code, deleted, inp.go_test_dirs),
@@ -463,6 +469,22 @@ def select_tests(inp: SelectionInput) -> Selection:
         skipped_files=tuple(triage.skipped),
         basis=basis,
     )
+
+
+_UNPLACED_REASON = "the graph has no edge from it into the repository's code"
+
+
+def _always_running(inp: SelectionInput) -> dict[str, str]:
+    """``{test file: why it runs with every subset}``; a detected reason wins.
+
+    A detected test the checkout no longer has is left out, like any test.
+    """
+    known = set(inp.known_tests)
+    out = dict.fromkeys(inp.unplaced_tests, _UNPLACED_REASON)
+    for test, reason in sorted(inp.always_run_tests.items()):
+        if not known or test in known:
+            out[test] = reason
+    return out
 
 
 def _triage(
@@ -521,14 +543,24 @@ def _index_reasons(inp: SelectionInput, *, has_code: bool) -> list[str]:
     return out
 
 
-def _notes(inp: SelectionInput, skipped: list[str], unplaced: bool) -> list[str]:
+def _notes(inp: SelectionInput, skipped: list[str], always: Mapping[str, str]) -> list[str]:
     """Reasons that explain the selection without forcing a full run."""
     out = []
-    if unplaced:
-        out.append(
-            f"{len(inp.unplaced_tests)} test file(s) the graph cannot see into run with "
-            f"every selection (e.g. {sorted(inp.unplaced_tests)[0]})."
-        )
+    if always:
+        detected = sorted(t for t in always if t in inp.always_run_tests)
+        unseen = len(always) - len(detected)
+        if unseen:
+            example = sorted(t for t in always if t not in inp.always_run_tests)[0]
+            out.append(
+                f"{unseen} test file(s) the graph cannot see into run with every selection "
+                f"(e.g. {example})."
+            )
+        if detected:
+            out.append(
+                f"{len(detected)} test file(s) that list source files or run the project in "
+                f"a child process run with every selection (e.g. {detected[0]}: "
+                f"{inp.always_run_tests[detected[0]]})."
+            )
     if not inp.map_current and inp.tiers.get("covered"):
         out.append(
             "The per-test map was measured at another commit, so covering tests "
