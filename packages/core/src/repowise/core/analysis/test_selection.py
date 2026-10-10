@@ -234,7 +234,9 @@ class Selection:
     ``no-tests-needed``, ``deleted-test``, ``test-tree``, ``test-package``,
     ``conftest``, ``helper-importers``, ``coverage``,
     ``changed-test``, ``call-graph``, ``import-graph``, ``filename-pattern``,
-    ``unknown``, or ``none`` when nothing was asked (no index).
+    ``unknown``, or ``none`` when nothing was asked (no index). ``why`` says,
+    per selected test file, what put it in: the changed file and evidence that
+    reached it, or the reason it runs with every subset.
     """
 
     run_all: bool
@@ -245,6 +247,7 @@ class Selection:
     always_run: tuple[str, ...] = ()
     skipped_files: tuple[str, ...] = ()
     basis: Mapping[str, str] = field(default_factory=dict)
+    why: Mapping[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -256,6 +259,7 @@ class Selection:
             "always_run": list(self.always_run),
             "skipped_files": list(self.skipped_files),
             "basis": dict(self.basis),
+            "why": dict(self.why),
         }
 
 
@@ -468,6 +472,7 @@ def select_tests(inp: SelectionInput) -> Selection:
         always_run=inp.config.always_run,
         skipped_files=tuple(triage.skipped),
         basis=basis,
+        why={**_why(triage.code, per_file, evidence), **always},
     )
 
 
@@ -480,11 +485,42 @@ def _always_running(inp: SelectionInput) -> dict[str, str]:
     A detected test the checkout no longer has is left out, like any test.
     """
     known = set(inp.known_tests)
-    out = dict.fromkeys(inp.unplaced_tests, _UNPLACED_REASON)
+    out = {t: f"runs with every subset: {_UNPLACED_REASON}" for t in inp.unplaced_tests}
     for test, reason in sorted(inp.always_run_tests.items()):
         if not known or test in known:
-            out[test] = reason
+            out[test] = f"runs with every subset: {reason}"
     return out
+
+
+def _why(
+    code: list[str], per_file: Mapping[str, tuple[list[_TestRef], str]], ev: _Evidence
+) -> dict[str, str]:
+    """``{test file: the first changed file that selected it, and the evidence}``."""
+    out: dict[str, str] = {}
+    for path in code:
+        tests, basis = per_file[path]
+        vias = {f: via for f, via in ev.inferred.get(path, ())}
+        covered = {f for _, f in ev.covered.get(path, ())}
+        for _, test_file in tests:
+            if test_file and test_file not in out:
+                via = "coverage" if test_file in covered else vias.get(test_file, basis)
+                out[test_file] = f"{path} changed ({via})"
+    return out
+
+
+def explain_test(selection: Selection, test: str) -> tuple[bool, list[str]]:
+    """Whether *test* (a file or node id) runs for this selection, and why, in plain lines."""
+    test_file = test.split("::", 1)[0]
+    if selection.run_all:
+        return True, ["Every test runs:", *selection.reasons]
+    if why := selection.why.get(test_file):
+        return True, [f"Selected: {why}."]
+    if test in selection.always_run or test_file in selection.always_run:
+        return True, ["Selected: it is listed in tests.always_run."]
+    return False, [
+        "Not selected: no changed file reaches it through coverage, the call graph or "
+        "the import graph, and it is not a test that runs with every subset."
+    ]
 
 
 def _triage(
