@@ -281,3 +281,17 @@ def test_a_changed_test_package_init_selects_the_tests_under_it(repo) -> None:
     assert data["run_all"] is False, data["reasons"]
     assert data["selected"]["basis"]["tests/__init__.py"] == "test-package"
     assert data["args"] == ["tests/test_a.py"]
+
+
+def test_a_runner_is_told_of_always_run_tests_for_another(repo) -> None:
+    (repo / ".repowise" / "config.yaml").write_text(
+        "tests:\n  always_run: [web/app.test.ts]\n", encoding="utf-8"
+    )
+    result = _run(repo, "main...feat", "--format", "args", "--runner", "pytest")
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "tests/test_a.py\n"
+    assert "not in these pytest arguments (1 for jest; e.g. web/app.test.ts)" in _err(result)
+    data = json.loads(_run(repo, "main...feat", "--format", "json", "--runner", "pytest").stdout)
+    assert data["left_out"] == {"jest": ["web/app.test.ts"]}
+    files = _run(repo, "main...feat", "--format", "args", "--runner", "files")
+    assert files.stdout == "tests/test_a.py web/app.test.ts\n"
